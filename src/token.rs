@@ -220,3 +220,7 @@ pub fn refresh_token(server_id: Option<&str>) -> Result<(), Error> {
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "token_test.rs"]
+mod test;

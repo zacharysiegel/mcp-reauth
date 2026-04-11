@@ -253,3 +253,7 @@ pub fn uninstall_hook(server_id: Option<&str>) -> Result<(), Error> {
     log!("Uninstalled {total_removed} hook(s).");
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "hook_test.rs"]
+mod test;
