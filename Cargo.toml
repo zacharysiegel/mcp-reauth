@@ -1,0 +1,20 @@
+[package]
+name = "mcp-reauth"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+base64 = "0.22"
+chrono = "0.4"
+clap = { version = "4.6.0", default-features = false, features = ["help", "std"] }
+open = "5"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tiny_http = "0.12"
+toml = "0.8"
+ureq = { version = "2", features = ["json", "native-certs"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+whoami = "1"
