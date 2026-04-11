@@ -43,7 +43,7 @@ Multiple `[[servers]]` blocks can be defined. All commands operate on all server
 
 ```sh
 cargo build --release
-./target/release/mcp-reauth hook install
+mcp-reauth hook install
 ```
 
 `hook install` writes two kinds of hooks into `~/.claude/settings.json`:
@@ -53,21 +53,21 @@ cargo build --release
 To remove the hooks:
 
 ```sh
-./target/release/mcp-reauth hook uninstall
+mcp-reauth hook uninstall
 ```
 
 ## Usage
 
 ```sh
 # Refresh all servers (default action, also what hooks run)
-./target/release/mcp-reauth
+mcp-reauth
 
 # Refresh a specific server
-./target/release/mcp-reauth --server my-server
+mcp-reauth --server my-server
 
 # Invalidate tokens to force re-authentication
-./target/release/mcp-reauth invalidate
-./target/release/mcp-reauth invalidate --server my-server
+mcp-reauth invalidate
+mcp-reauth invalidate --server my-server
 ```
 
 ## How it works
