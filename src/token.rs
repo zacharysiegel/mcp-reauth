@@ -1,8 +1,9 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cache;
-use crate::config::{ResolvedServerConfig, ServerConfig};
+use crate::config::{ResolvedServerConfig, ServerConfig, ServerMode};
 use crate::error::Error;
 use crate::launchd;
 use crate::log;
@@ -41,7 +42,14 @@ fn now_epoch_ms() -> u64 {
 }
 
 fn token_needs_refresh(server_config: &ServerConfig, data: &Value) -> bool {
-    let server_key = match find_server_key(data, server_config.resource_url()) {
+    let resource_url = match server_config.resource_url() {
+        Some(url) => url,
+        None => {
+            log!("[{}] No resource URL configured.", server_config.id);
+            return true;
+        }
+    };
+    let server_key = match find_server_key(data, resource_url) {
         Some(key) => key,
         None => {
             log!("[{}] No MCP entry found in keychain.", server_config.id);
@@ -86,7 +94,7 @@ fn resolve_server_name_from_config(server_config: &ServerConfig, data: &Value) -
     server_config
         .server_name
         .clone()
-        .or_else(|| server_name(data, server_config.resource_url()))
+        .or_else(|| server_name(data, server_config.resource_url()?))
 }
 
 fn resolve_server_name_from_resolved(resolved: &ResolvedServerConfig, data: &Value) -> Option<String> {
@@ -94,6 +102,13 @@ fn resolve_server_name_from_resolved(resolved: &ResolvedServerConfig, data: &Val
         .server_name
         .clone()
         .or_else(|| server_name(data, &resolved.resource))
+}
+
+fn log_token_refreshed(id: &str, expires_at_ms: u64) {
+    let remaining_seconds = expires_at_ms.saturating_sub(now_epoch_ms()) / 1000;
+    let minutes = remaining_seconds / 60;
+    let seconds = remaining_seconds % 60;
+    log!("[{id}] Token refreshed successfully. Expires in {minutes}m:{seconds:02}s.");
 }
 
 fn update_keychain_data(
@@ -141,7 +156,7 @@ fn update_keychain_data(
         "clientId": resolved.client_id,
     });
 
-    log!("[{}] Token refreshed successfully. Expires in {} hours.", resolved.id, expires_in / 3600);
+    log_token_refreshed(&resolved.id, expires_at_ms);
     cache::write(&resolved.id, &name, expires_at_ms);
     Ok(())
 }
@@ -149,37 +164,144 @@ fn update_keychain_data(
 pub fn invalidate_token(server_id: Option<&str>) -> Result<(), Error> {
     let config = crate::config::load()?;
     let servers = config.resolve_servers(server_id)?;
-    let mut data = crate::keychain::read()?;
-    let mut invalidated = 0;
 
-    for server_config in &servers {
-        let key = match find_server_key(&data, server_config.resource_url()) {
-            Some(key) => key,
-            None => {
-                log!("[{}] No MCP entry found in keychain — skipping.", server_config.id);
-                continue;
-            }
-        };
+    let (command_servers, oauth_servers): (Vec<_>, Vec<_>) = servers
+        .into_iter()
+        .partition(|server| server.mode() == ServerMode::Command);
 
-        let entry = match data.pointer_mut(&format!("/mcpOAuth/{key}")) {
-            Some(entry) => entry,
-            None => continue,
-        };
-
-        entry["expiresAt"] = serde_json::json!(0);
+    for server_config in &command_servers {
         cache::remove(&server_config.id);
-        log!("[{}] Token invalidated.", server_config.id);
-        invalidated += 1;
+        log!("[{}] Cache invalidated (command mode).", server_config.id);
     }
 
-    if invalidated > 0 {
-        crate::keychain::write(&data)?;
+    if !oauth_servers.is_empty() {
+        let mut data = crate::keychain::read()?;
+        let mut invalidated = 0;
+
+        for server_config in &oauth_servers {
+            let resource_url = match server_config.resource_url() {
+                Some(url) => url,
+                None => {
+                    log!("[{}] No resource URL configured — skipping.", server_config.id);
+                    continue;
+                }
+            };
+            let key = match find_server_key(&data, resource_url) {
+                Some(key) => key,
+                None => {
+                    log!("[{}] No MCP entry found in keychain — skipping.", server_config.id);
+                    continue;
+                }
+            };
+
+            let entry = match data.pointer_mut(&format!("/mcpOAuth/{key}")) {
+                Some(entry) => entry,
+                None => continue,
+            };
+
+            entry["expiresAt"] = serde_json::json!(0);
+            cache::remove(&server_config.id);
+            log!("[{}] Token invalidated.", server_config.id);
+            invalidated += 1;
+        }
+
+        if invalidated > 0 {
+            crate::keychain::write(&data)?;
+        }
     }
 
     Ok(())
 }
 
+fn decode_jwt_exp(token: &str) -> Option<u64> {
+    let payload = token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload)
+        .or_else(|_| {
+            use base64::engine::general_purpose::STANDARD;
+            STANDARD.decode(payload)
+        })
+        .ok()?;
+    let claims: Value = serde_json::from_slice(&decoded).ok()?;
+    claims.get("exp")?.as_u64()
+}
+
+fn refresh_command_server(server_config: &ServerConfig) -> Result<(), Error> {
+    let server_name = server_config.server_name.as_deref()
+        .unwrap_or(&server_config.id);
+
+    if let Some(cached) = cache::read(&server_config.id) {
+        let remaining_seconds = cached.expires_at_ms.saturating_sub(now_epoch_ms()) / 1000;
+        if remaining_seconds >= EXPIRY_BUFFER_SECONDS {
+            log!(
+                "[{}] Token still valid ({} minutes remaining).",
+                server_config.id,
+                remaining_seconds / 60,
+            );
+            return Ok(());
+        }
+    }
+
+    let command = server_config.token_command.as_ref().unwrap();
+    log!("[{}] Running token command...", server_config.id);
+
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", command])
+        .output()
+        .map_err(|error| Error::new(&format!(
+            "[{}] failed to run token_command: {error}",
+            server_config.id,
+        )))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::new(&format!(
+            "[{}] token_command exited with {}: {stderr}",
+            server_config.id,
+            output.status.code().unwrap_or(-1),
+        )));
+    }
+
+    let token = String::from_utf8(output.stdout)
+        .map_err(|error| Error::from_error_default(Box::new(error)))?
+        .trim()
+        .to_string();
+
+    if token.is_empty() {
+        return Err(Error::new(&format!(
+            "[{}] token_command produced empty output",
+            server_config.id,
+        )));
+    }
+
+    let expires_at_ms = if let Some(exp) = decode_jwt_exp(&token) {
+        exp * 1000
+    } else if let Some(ttl) = server_config.token_ttl {
+        log!(
+            "[{}] Could not decode JWT exp; using token_ttl={ttl}s.",
+            server_config.id,
+        );
+        now_epoch_ms() + (ttl * 1000)
+    } else {
+        return Err(Error::new(&format!(
+            "[{}] Could not decode JWT exp and no token_ttl set; \
+            set token_ttl in config or ensure token_command outputs a JWT with an exp claim.",
+            server_config.id,
+        )));
+    };
+
+    crate::claude_json::update_server_token(server_name, &token)?;
+
+    log_token_refreshed(&server_config.id, expires_at_ms);
+    cache::write(&server_config.id, server_name, expires_at_ms);
+
+    Ok(())
+}
+
 fn refresh_single_server(server_config: &ServerConfig) -> Result<(), Error> {
+    if server_config.mode() == ServerMode::Command {
+        return refresh_command_server(server_config);
+    }
+
     if let Some(cached) = cache::read(&server_config.id) {
         let remaining_seconds = cached.expires_at_ms.saturating_sub(now_epoch_ms()) / 1000;
         if remaining_seconds >= EXPIRY_BUFFER_SECONDS {

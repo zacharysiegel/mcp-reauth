@@ -7,6 +7,12 @@ use url::Url;
 use crate::error::Error;
 use crate::log;
 
+#[derive(Debug, PartialEq)]
+pub enum ServerMode {
+    OAuth,
+    Command,
+}
+
 #[derive(Deserialize)]
 pub struct Config {
     #[serde(rename = "servers")]
@@ -16,8 +22,14 @@ pub struct Config {
 #[derive(Deserialize, Clone)]
 pub struct ServerConfig {
     pub id: String,
-    pub url: String,
-    pub client_id: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub token_command: Option<String>,
+    #[serde(default)]
+    pub token_ttl: Option<u64>,
     #[serde(default)]
     pub resource: Option<String>,
     #[serde(default)]
@@ -42,8 +54,37 @@ pub struct ResolvedServerConfig {
 }
 
 impl ServerConfig {
-    pub fn resource_url(&self) -> &str {
-        self.resource.as_deref().unwrap_or(&self.url)
+    pub fn mode(&self) -> ServerMode {
+        if self.token_command.is_some() {
+            ServerMode::Command
+        } else {
+            ServerMode::OAuth
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), Error> {
+        match self.mode() {
+            ServerMode::Command => Ok(()),
+            ServerMode::OAuth => {
+                if self.url.is_none() {
+                    return Err(Error::new(&format!(
+                        "[{}] 'url' is required for OAuth servers",
+                        self.id,
+                    )));
+                }
+                if self.client_id.is_none() {
+                    return Err(Error::new(&format!(
+                        "[{}] 'client_id' is required for OAuth servers",
+                        self.id,
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub fn resource_url(&self) -> Option<&str> {
+        self.resource.as_deref().or(self.url.as_deref())
     }
 
     fn needs_discovery(&self) -> bool {
@@ -51,8 +92,19 @@ impl ServerConfig {
     }
 
     pub fn resolve(&self) -> Result<ResolvedServerConfig, Error> {
+        let url = self.url.as_ref()
+            .ok_or_else(|| Error::new(&format!(
+                "[{}] cannot resolve OAuth endpoints without 'url'",
+                self.id,
+            )))?;
+        let client_id = self.client_id.as_ref()
+            .ok_or_else(|| Error::new(&format!(
+                "[{}] cannot resolve OAuth endpoints without 'client_id'",
+                self.id,
+            )))?;
+
         let discovery = if self.needs_discovery() {
-            Some(fetch_discovery(&self.url)?)
+            Some(fetch_discovery(url)?)
         } else {
             None
         };
@@ -73,13 +125,13 @@ impl ServerConfig {
             .authorization_server_url
             .clone()
             .or_else(|| discovery.as_ref()?.get("issuer")?.as_str().map(String::from))
-            .unwrap_or_else(|| base_url(&self.url));
+            .unwrap_or_else(|| base_url(url));
 
         Ok(ResolvedServerConfig {
             id: self.id.clone(),
-            url: self.url.clone(),
-            client_id: self.client_id.clone(),
-            resource: self.resource.clone().unwrap_or_else(|| self.url.clone()),
+            url: url.clone(),
+            client_id: client_id.clone(),
+            resource: self.resource.clone().unwrap_or_else(|| url.clone()),
             authorization_endpoint,
             token_endpoint,
             authorization_server_url,
@@ -143,6 +195,9 @@ pub fn load() -> Result<Config, Error> {
         .map_err(|error| Error::new(&format!("could not parse {}: {error}", path.display())))?;
     if config.servers.is_empty() {
         return Err(Error::new("no servers configured in config.toml"));
+    }
+    for server in &config.servers {
+        server.validate()?;
     }
     Ok(config)
 }

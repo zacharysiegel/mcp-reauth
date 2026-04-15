@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::cache;
-use crate::config::ServerConfig;
+use crate::config::{ServerConfig, ServerMode};
 use crate::error::Error;
 use crate::log;
 use crate::logging;
@@ -112,13 +112,17 @@ fn resolve_server_name(server_config: &ServerConfig) -> Result<String, Error> {
         return Ok(name.clone());
     }
 
+    if server_config.mode() == ServerMode::Command {
+        return Ok(server_config.id.clone());
+    }
+
     if let Some(cached) = cache::read(&server_config.id) {
         return Ok(cached.server_name);
     }
 
     let keychain_data = crate::keychain::read()
         .unwrap_or_else(|_| serde_json::json!({"mcpOAuth": {}}));
-    token::server_name(&keychain_data, server_config.resource_url())
+    token::server_name(&keychain_data, server_config.resource_url().unwrap_or(""))
         .ok_or_else(|| Error::new(&format!(
             "[{}] could not determine MCP server name; set server_name in config or authenticate once manually",
             server_config.id,

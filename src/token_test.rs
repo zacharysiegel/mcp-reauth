@@ -54,3 +54,36 @@ fn find_server_key_returns_none_for_unknown_url() {
     let data = keychain_data("my-mcp", "https://example.com/mcp", "tok", 0);
     assert_eq!(find_server_key(&data, "https://other.com"), None);
 }
+
+#[test]
+fn decode_jwt_exp_extracts_exp_from_valid_jwt() {
+    // Build a JWT with exp=1700000000
+    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(r#"{"alg":"RS256","typ":"JWT"}"#);
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(r#"{"sub":"user","exp":1700000000}"#);
+    let token = format!("{header}.{payload}.signature");
+
+    assert_eq!(decode_jwt_exp(&token), Some(1700000000));
+}
+
+#[test]
+fn decode_jwt_exp_returns_none_for_non_jwt() {
+    assert_eq!(decode_jwt_exp("not-a-jwt"), None);
+}
+
+#[test]
+fn decode_jwt_exp_returns_none_for_jwt_without_exp() {
+    let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(r#"{"alg":"RS256"}"#);
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(r#"{"sub":"user"}"#);
+    let token = format!("{header}.{payload}.signature");
+
+    assert_eq!(decode_jwt_exp(&token), None);
+}
+
+#[test]
+fn decode_jwt_exp_returns_none_for_empty_string() {
+    assert_eq!(decode_jwt_exp(""), None);
+}

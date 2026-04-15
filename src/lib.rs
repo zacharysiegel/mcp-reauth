@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod claude_json;
 pub mod config;
 pub mod error;
 pub mod hook;
