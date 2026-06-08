@@ -42,7 +42,7 @@ Multiple `[[servers]]` blocks can be defined. All commands operate on all server
 ## Setup
 
 ```sh
-cargo build --release
+cargo install --path .
 mcp-reauth hook install
 ```
 
